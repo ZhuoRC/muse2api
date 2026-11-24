@@ -1559,7 +1559,7 @@ function keepaliveCell(a){
   const next = a.next_keepalive_at ? until(a.next_keepalive_at) : '不保活';
   const title = '上次保活：' + (a.last_keepalive ? fmtTime(a.last_keepalive) : '从未') +
                 '；下次：' + (a.next_keepalive_at ? fmtTime(a.next_keepalive_at) : '不保活');
-  return `<td class="mono" title="${esc(title)}">${esc(last)}<div class="proxy-summary">${esc(next)}</div></td>`;
+  return `<td class="mono" style="white-space:nowrap" title="${esc(title)}">${esc(last)}<div class="proxy-summary">${esc(next)}</div></td>`;
 }
 const SHOW_DISABLED_KEY = 'muse2api_show_disabled';
 function showDisabledPref(){
