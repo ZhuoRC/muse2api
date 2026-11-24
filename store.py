@@ -124,6 +124,22 @@ class Store:
             _write(self.cfg.accounts_file, self.accounts)
             return acc
 
+    def import_account(self, cookies: dict, label: str = "",
+                       cookies_exp: dict | None = None) -> tuple[dict, bool]:
+        """导入账号：同名（label）已存在时视为重新登录，替换 cookie 而不是新建。
+
+        启用状态保持不变；返回 (账号, 是否替换了已有账号)。
+        """
+        existing = next((a for a in self.accounts if label and a.get("label") == label), None)
+        if existing is None:
+            return self.add_account(cookies, label, cookies_exp=cookies_exp), False
+        exp = {k: int(v) for k, v in (cookies_exp or {}).items() if _is_pos(v)}
+        acc = self.update_account(existing["id"], cookies=cookies, ok=None,
+                                  note="已重新导入 cookie",
+                                  expiry_anchor=int(time.time()),
+                                  cookies_exp=exp)
+        return acc, True
+
     @staticmethod
     def public_account(account: dict) -> dict:
         item = {k: v for k, v in account.items() if k not in ("cookies", "proxy")}

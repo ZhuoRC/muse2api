@@ -1579,6 +1579,9 @@ def get_video(task_id: str, _=Depends(auth)):
         out["url"] = vurl
         if "video" not in out:
             out["video"] = {"url": vurl}
+    acc = store.get_account(out["account"]) if out.get("account") else None
+    if acc:
+        out["account_label"] = acc.get("label")
     return out
 
 
@@ -1962,23 +1965,23 @@ def add_account(req: AccountRequest, _=Depends(auth)):
     added: list[dict] = []
     seen: list[dict] = []          # 本次导入的所有 cookie，用来检查核心项是否齐全
 
+    def _import(cookies: dict, label: str, exp: dict | None = None) -> None:
+        acc, replaced = store.import_account(cookies, label, cookies_exp=exp)
+        seen.append(cookies)
+        added.append({"id": acc["id"], "label": acc["label"],
+                      "cookie_count": len(cookies),
+                      "expires_at": acc.get("expires_at"),
+                      "replaced": replaced, "enabled": acc.get("enabled")})
+
     if req.batch:
         for label, cookies in parse_batch(req.batch):
-            acc = store.add_account(cookies, label)
-            seen.append(cookies)
-            added.append({"id": acc["id"], "label": acc["label"],
-                          "cookie_count": len(cookies),
-                          "expires_at": acc.get("expires_at")})
+            _import(cookies, label)
 
     cookies = dict(req.cookies)
     if req.cookie_header:
         cookies.update(parse_cookie_text(req.cookie_header))
     if cookies:
-        acc = store.add_account(cookies, req.label, cookies_exp=req.expires)
-        seen.append(cookies)
-        added.append({"id": acc["id"], "label": acc["label"],
-                      "cookie_count": len(cookies),
-                      "expires_at": acc.get("expires_at")})
+        _import(cookies, req.label, req.expires)
 
     if not added:
         raise HTTPException(400, "未解析到任何 cookie，请检查格式")
@@ -2853,6 +2856,8 @@ async def admin_upgrade_now(payload: dict = Body(default={}), _=Depends(auth)):
 @app.post("/admin/repo/push")
 async def admin_repo_push(payload: dict = Body(default={}), _=Depends(auth)):
     """维护者专用：将当前节点核心代码推送到 GitHub 仓库（自动过滤 .env 与 data 目录）。"""
+    if MANAGED_DEPLOYMENT:
+        raise HTTPException(409, "此实例通过镜像部署，代码改动请在宿主仓库提交")
     msg = (payload.get("message") or "").strip() or f"chore: sync update ({time.strftime('%Y-%m-%d %H:%M:%S')})"
     new_token = (payload.get("github_token") or "").strip()
     if new_token:
