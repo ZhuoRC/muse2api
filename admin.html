@@ -374,19 +374,20 @@
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px">
         <div style="display:flex;align-items:center;gap:10px">
           <h3 style="margin:0">账号列表 <span class="tag" id="poolCount">0</span></h3>
-          <span class="badge ok" id="keepaliveBadge" style="font-size:11px">● 自动保活轮转中 (30m)</span>
+          <span class="badge ok" id="keepaliveBadge" style="font-size:11px">● 自动保活轮转中 (15m)</span>
         </div>
-        <div style="display:flex;gap:8px">
+        <div style="display:flex;gap:8px;align-items:center">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer"><input type="checkbox" id="showDisabled" onchange="toggleShowDisabled()"> 显示已禁用账号</label>
           <button class="secondary" id="btnKeepaliveAll" onclick="keepaliveAll()" style="font-size:12px;padding:6px 14px">⚡ 一键保活所有账号</button>
         </div>
       </div>
-      <div class="hint" data-i18n="keepalive-hint">系统已开启<b>后台每 30 分钟静默保活</b>与<b>多账号公平轮转（LRU）</b>；「测试」会真实打开 muse.ai 验证会话。</div>
+      <div class="hint" data-i18n="keepalive-hint">系统已开启<b>后台每 15 分钟检查一轮</b>：从没保活过、或距上次超过 6 小时且会话 36 小时内到期 / 状态异常的账号才会续期；并做<b>多账号公平轮转（LRU）</b>。「测试」会真实打开 muse.ai 验证会话。</div>
       <div class="tblwrap"><table>
         <thead><tr>
           <th>标签</th><th>账号 ID</th><th>状态</th><th>有效期</th><th>额度</th><th data-i18n="col-enabled">启用</th><th>Cookie</th>
-          <th>最后使用</th><th>备注</th><th style="min-width:250px">操作</th>
+          <th>最后使用</th><th>保活</th><th>备注</th><th style="min-width:250px">操作</th>
         </tr></thead>
-        <tbody id="poolBody"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
+        <tbody id="poolBody"><tr><td colspan="11" class="empty">加载中…</td></tr></tbody>
       </table></div>
     </div>
   </section>
@@ -934,7 +935,12 @@ const I18N_EN = {
   "导入账号": "Import accounts",
   "清空": "Clear",
   "账号列表": "Accounts",
-  "● 自动保活轮转中 (30m)": "● Auto keep-alive rotation on (30m)",
+  "● 自动保活轮转中 (15m)": "● Auto keep-alive rotation on (15m)",
+  "显示已禁用账号": "Show disabled accounts",
+  "保活": "Keep-alive",
+  "即将保活": "due now",
+  "不保活": "not kept alive",
+  "导入后自动测试中…": "Testing after import…",
   "⚡ 一键保活所有账号": "⚡ Keep all accounts alive now",
   "标签": "Label",
   "账号 ID": "Account ID",
@@ -1247,7 +1253,7 @@ const I18N_EN_HTML = {
   "auth-banner": "\n      <b>Enter your API Key first so the page can load data</b><br>\n      <span style=\"color:var(--muted)\">\n        The API Key is this service's own \"access password\". It stops other people from using your Muse account quota.\n        It is <b style=\"color:var(--text)\">not</b> your Muse password. It is a random string generated at deploy time (it starts with <code>m2a_</code>).<br>\n        Paste it into the box at the top right and click \"Save\". Your browser remembers it, so you won't need to enter it again.\n      </span>\n    ",
   "model-names-hint": "\n        Model names: <code>muse-spark</code> (chat/code), <code>muse-image</code> (images), <code>muse-video</code> (videos).\n        See the \"Integration Docs\" tab for full examples.\n      ",
   "add-account-hint": "\n        Copy the <b>muse.ai</b> cookie string from your browser and paste it here. Required cookies:\n        <code>hatch_sess</code>. <code>hatch_vml</code> is an optional workspace token and does not block import.\n        For batch import, put one account per line in the format <code>label | cookie string</code> (label is optional).\n      ",
-  "keepalive-hint": "The system runs <b>a silent background keep-alive every 30 minutes</b> and <b>fair multi-account rotation (LRU)</b>. \"Test\" actually opens muse.ai to verify the session.",
+  "keepalive-hint": "The system <b>checks every 15 minutes in the background</b>: an account is renewed if it was never kept alive, or more than 6 hours have passed and its session expires within 36 hours or its status is not OK. It also does <b>fair multi-account rotation (LRU)</b>. \"Test\" actually opens muse.ai to verify the session.",
   "ext-why-hint": "\n        A small browser extension syncs <b>the muse.ai login you already have on your own computer</b>.\n        No Python, no terminal, no commands.<br>\n        <b>Why an extension is required</b>: muse.ai's login session cookie is marked\n        <code>httpOnly</code>, so page scripts (typing <code>document.cookie</code> in F12,\n        bookmarklets) can't read them. Only a browser extension's <code>cookies</code> API can.\n      ",
   "ext-unzip-hint": "\n            Unzip it to a folder you won't delete, e.g. <code>D:\\muse2api-extension</code>.\n          ",
   "ext-load-steps": "\n            <li>Type <code>chrome://extensions</code> in the address bar and press Enter</li>\n            <li>Turn on the <b>Developer mode</b> switch at the top right</li>\n            <li>Click <b>Load unpacked</b> at the top left</li>\n            <li>Select the <b>folder</b> you unzipped in step 1 (not a single file inside it)</li>\n          ",
@@ -1276,6 +1282,12 @@ const I18N_EN_PATTERNS = ([
   ["(\\d+) 分钟前", "$1 min ago"],
   ["(\\d+) 小时前", "$1 h ago"],
   ["(\\d+) 天前", "$1 d ago"],
+  ["下次 (\\d+) 分钟后", "next in $1 min"],
+  ["下次 (\\d+) 小时后", "next in $1 h"],
+  ["下次 (\\d+) 天后", "next in $1 d"],
+  ["上次保活：(.*?)；下次：(.*)", "Last keep-alive: $1; next: $2"],
+  ["(\\d+) / (\\d+)（已隐藏 (\\d+) 个禁用账号）", "$1 / $2 ($3 disabled hidden)"],
+  ["没有启用的账号（已隐藏 (\\d+) 个禁用账号，勾选「显示已禁用账号」查看）", "No enabled accounts ($1 disabled hidden; tick \"Show disabled accounts\" to see them)"],
   ["查询 (\\d+) 秒前", "checked $1s ago"],
   ["查询 (\\d+) 分钟前", "checked $1 min ago"],
   ["查询 (\\d+) 小时前", "checked $1 h ago"],
@@ -1535,6 +1547,28 @@ function fmtTime(ts){
   const p = n => String(n).padStart(2,'0');
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
+function until(ts){
+  const s = Math.max(0, ts - Math.floor(Date.now()/1000));
+  if (s < 60) return '即将保活';
+  if (s < 3600) return '下次 ' + Math.floor(s/60) + ' 分钟后';
+  if (s < 86400) return '下次 ' + Math.floor(s/3600) + ' 小时后';
+  return '下次 ' + Math.floor(s/86400) + ' 天后';
+}
+function keepaliveCell(a){
+  const last = ago(a.last_keepalive);
+  const next = a.next_keepalive_at ? until(a.next_keepalive_at) : '不保活';
+  const title = '上次保活：' + (a.last_keepalive ? fmtTime(a.last_keepalive) : '从未') +
+                '；下次：' + (a.next_keepalive_at ? fmtTime(a.next_keepalive_at) : '不保活');
+  return `<td class="mono" title="${esc(title)}">${esc(last)}<div class="proxy-summary">${esc(next)}</div></td>`;
+}
+const SHOW_DISABLED_KEY = 'muse2api_show_disabled';
+function showDisabledPref(){
+  try { return localStorage.getItem(SHOW_DISABLED_KEY) === '1'; } catch (e) { return false; }
+}
+function toggleShowDisabled(){
+  try { localStorage.setItem(SHOW_DISABLED_KEY, $('showDisabled').checked ? '1' : '0'); } catch (e) {}
+  loadPool();
+}
 function ago(ts){
   if (!ts) return '从未';
   const s = Math.max(0, Math.floor(Date.now()/1000) - ts);
@@ -1733,7 +1767,10 @@ async function loadPool(){
     $('sOk').textContent    = st.healthy ?? 0;
     $('sBad').textContent   = st.error ?? 0;
     $('sDis').textContent   = st.disabled ?? 0;
-    $('poolCount').textContent = accounts.length;
+    const showDisabled = $('showDisabled').checked;
+    const shown = showDisabled ? accounts : accounts.filter(a => a.enabled);
+    const hidden = accounts.length - shown.length;
+    $('poolCount').textContent = hidden ? `${shown.length} / ${accounts.length}（已隐藏 ${hidden} 个禁用账号）` : accounts.length;
     $('pAcc').className = 'pill ' + (accounts.length ? 'on' : 'off');
     $('pAcc').innerHTML = `<span class="led"></span>账号 <b>${accounts.length}</b>`;
 
@@ -1758,10 +1795,14 @@ async function loadPool(){
     }
 
     if (!accounts.length){
-      $('poolBody').innerHTML = '<tr><td colspan="10" class="empty">还没有账号。去「获取 Cookie」页签按三步导入一个</td></tr>';
+      $('poolBody').innerHTML = '<tr><td colspan="11" class="empty">还没有账号。去「获取 Cookie」页签按三步导入一个</td></tr>';
       return;
     }
-    $('poolBody').innerHTML = accounts.map(a => {
+    if (!shown.length){
+      $('poolBody').innerHTML = `<tr><td colspan="11" class="empty">没有启用的账号（已隐藏 ${hidden} 个禁用账号，勾选「显示已禁用账号」查看）</td></tr>`;
+      return;
+    }
+    $('poolBody').innerHTML = shown.map(a => {
       const ok = a.ok;
       const badge = !a.enabled ? '<span class="badge mute">已禁用</span>'
                   : ok === true  ? '<span class="badge ok">● 可用</span>'
@@ -1777,6 +1818,7 @@ async function loadPool(){
         <td>${a.enabled ? '<span class="badge ok">开</span>' : '<span class="badge mute">关</span>'}</td>
         <td class="mono">${a.cookie_count}</td>
         <td class="mono" title="${a.last_used ? fmtTime(a.last_used) : ''}">${ago(a.last_used)}</td>
+        ${keepaliveCell(a)}
         <td class="mono ellip" title="${esc(a.note||'')}">${esc(a.note || '—')}</td>
         <td><div class="acts">
           <button class="ghost mini" onclick="testAcc('${a.id}')">测试</button>
@@ -1792,8 +1834,8 @@ async function loadPool(){
     }).join('');
   }catch(e){
     $('poolBody').innerHTML = authOK === false
-      ? '<tr><td colspan="10" class="empty">🔑 请先在右上角填入 API Key 并点「保存」</td></tr>'
-      : `<tr><td colspan="10" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+      ? '<tr><td colspan="11" class="empty">🔑 请先在右上角填入 API Key 并点「保存」</td></tr>'
+      : `<tr><td colspan="11" class="empty">加载失败：${esc(e.message)}</td></tr>`;
   }
 }
 
@@ -2445,6 +2487,8 @@ async function loadStatus(){
 }
 
 function refreshAll(){ loadStatus(); loadPool(); loadApikey(); loadRepoStatus(false); }
+
+$('showDisabled').checked = showDisabledPref();
 
 refreshAll();
 setInterval(() => {

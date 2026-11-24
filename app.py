@@ -640,6 +640,7 @@ class AccountRequest(BaseModel):
     batch: str | None = None          # 多行文本，每行一个账号
     expires: dict[str, int] = Field(default_factory=dict)   # cookie 名 -> 过期时间戳
     proxy: AccountProxy | None = None
+    verify: bool = False              # 导入后在后台测试会话并读取额度
 
 
 class AccountPatch(BaseModel):
@@ -1956,7 +1957,14 @@ def admin_status(_=Depends(auth)):
 # ------------------------- 管理：账号池 -------------------------
 @app.get("/admin/accounts")
 def list_accounts(_=Depends(auth)):
-    return {"accounts": store.list_accounts(), "stats": store.stats()}
+    now = int(time.time())
+    next_run = KEEPALIVE_STATE.get("next_run")
+    accounts = store.list_accounts()
+    for account in accounts:
+        account["next_keepalive_at"] = next_keepalive_at(account, now, next_run)
+    return {"accounts": accounts, "stats": store.stats(),
+            "keepalive": {"interval": KEEPALIVE_INTERVAL_SECONDS, "next_run": next_run,
+                          "running": KEEPALIVE_STATE.get("running", False)}}
 
 
 @app.post("/admin/accounts")
@@ -1968,10 +1976,13 @@ def add_account(req: AccountRequest, _=Depends(auth)):
     def _import(cookies: dict, label: str, exp: dict | None = None) -> None:
         acc, replaced = store.import_account(cookies, label, cookies_exp=exp)
         seen.append(cookies)
-        added.append({"id": acc["id"], "label": acc["label"],
-                      "cookie_count": len(cookies),
-                      "expires_at": acc.get("expires_at"),
-                      "replaced": replaced, "enabled": acc.get("enabled")})
+        row = {"id": acc["id"], "label": acc["label"],
+               "cookie_count": len(cookies),
+               "expires_at": acc.get("expires_at"),
+               "replaced": replaced, "enabled": acc.get("enabled")}
+        if req.verify:
+            row["verify"] = _start_import_verify(acc["id"])
+        added.append(row)
 
     if req.batch:
         for label, cookies in parse_batch(req.batch):
@@ -2098,6 +2109,59 @@ def del_account(aid: str, _=Depends(auth)):
     return {"deleted": True, "id": aid}
 
 
+def _test_account_sync(aid: str) -> dict:
+    """真实打开 muse.ai 验证会话，并顺带读取额度；结果写回账号记录。"""
+    with GEN_LOCK, _account_operation(aid) as acc:
+        try:
+            engine.start()
+            engine.refresh(acc["cookies"], acc.get("cookies_exp"), account_id=aid)
+            synced = _sync_cookies(aid)
+            quota = None
+            quota_error = None
+            try:  # Session validity and quota readability are independent results.
+                quota = engine.quota(acc["cookies"],
+                                     acc.get("cookies_exp"), account_id=aid)
+                if quota.get("found"):
+                    quota["checked_at"] = int(time.time())
+                    store.update_account(aid, quota=quota)
+                else:
+                    quota_error = "额度面板未读到有效数据；旧缓存未覆盖"
+                    quota = None
+            except Exception as exc:  # noqa: BLE001
+                quota_error = f"{type(exc).__name__}；额度缓存未更新"
+            store.mark(aid, True, "会话有效" + ("；额度读取失败" if quota_error else ""))
+            return {"ok": True, "message": "会话有效，可正常生成",
+                    "synced": synced, "quota": quota,
+                    "quota_error": quota_error}
+        except MuseAuthError as exc:
+            store.mark(aid, False, str(exc)[:200])
+            return {"ok": False, "message": str(exc)[:200]}
+        except Exception as exc:  # noqa: BLE001
+            store.touch_keepalive(aid, None, f"测试未确认（保留账号状态）: {str(exc)[:200]}")
+            return {"ok": False, "message": str(exc)[:200]}
+
+
+def _run_import_verify(aid: str) -> None:
+    try:
+        res = _test_account_sync(aid)
+    except HTTPException as exc:
+        res = {"ok": False, "message": str(exc.detail)[:200]}
+    except Exception as exc:  # noqa: BLE001
+        res = {"ok": False, "message": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    store.update_account(aid, verify={
+        "status": "done", "ok": bool(res.get("ok")), "message": res.get("message", ""),
+        "quota_error": res.get("quota_error"), "finished_at": int(time.time()),
+    })
+
+
+def _start_import_verify(aid: str) -> str:
+    """导入后在后台排队测试（会等生成锁），进度记在账号的 verify 字段里，调用方轮询账号列表。"""
+    store.update_account(aid, verify={"status": "running", "started_at": int(time.time())},
+                         note="导入后自动测试中…")
+    threading.Thread(target=_run_import_verify, args=(aid,), daemon=True).start()
+    return "running"
+
+
 @app.post("/admin/accounts/{aid}/test")
 async def test_account(aid: str, _=Depends(auth)):
     """真实打开 muse.ai 验证该账号 cookie 是否仍可登录。"""
@@ -2107,37 +2171,7 @@ async def test_account(aid: str, _=Depends(auth)):
     if not acc.get("cookies"):
         raise HTTPException(400, "该账号没有 cookie")
 
-    def _probe():
-        with GEN_LOCK, _account_operation(aid) as acc:
-            try:
-                engine.start()
-                engine.refresh(acc["cookies"], acc.get("cookies_exp"), account_id=aid)
-                synced = _sync_cookies(aid)
-                quota = None
-                quota_error = None
-                try:  # Session validity and quota readability are independent results.
-                    quota = engine.quota(acc["cookies"],
-                                         acc.get("cookies_exp"), account_id=aid)
-                    if quota.get("found"):
-                        quota["checked_at"] = int(time.time())
-                        store.update_account(aid, quota=quota)
-                    else:
-                        quota_error = "额度面板未读到有效数据；旧缓存未覆盖"
-                        quota = None
-                except Exception as exc:  # noqa: BLE001
-                    quota_error = f"{type(exc).__name__}；额度缓存未更新"
-                store.mark(aid, True, "会话有效" + ("；额度读取失败" if quota_error else ""))
-                return {"ok": True, "message": "会话有效，可正常生成",
-                        "synced": synced, "quota": quota,
-                        "quota_error": quota_error}
-            except MuseAuthError as exc:
-                store.mark(aid, False, str(exc)[:200])
-                return {"ok": False, "message": str(exc)[:200]}
-            except Exception as exc:  # noqa: BLE001
-                store.touch_keepalive(aid, None, f"测试未确认（保留账号状态）: {str(exc)[:200]}")
-                return {"ok": False, "message": str(exc)[:200]}
-
-    res = await asyncio.to_thread(_probe)
+    res = await asyncio.to_thread(_test_account_sync, aid)
     if not res["ok"]:
         return JSONResponse(res, status_code=200)
     return res
@@ -2448,6 +2482,37 @@ KEEPALIVE_STATE = {
     "last_result": None,
     "next_run": None,
 }
+KEEPALIVE_INTERVAL_SECONDS = 900
+KEEPALIVE_MIN_GAP_SECONDS = 6 * 3600
+KEEPALIVE_EXPIRY_WINDOW_SECONDS = 36 * 3600
+
+
+def keepalive_needed(account: dict, now: int) -> bool:
+    """非强制保活时，这个账号本轮要不要续期：从没保活过，或距上次超过 6 小时且会话 36 小时内到期 / 状态不是正常。"""
+    last_ka = account.get("last_keepalive") or 0
+    exp_at = account.get("expires_at")
+    return (not last_ka
+            or ((now - last_ka) > KEEPALIVE_MIN_GAP_SECONDS and
+                (not exp_at or exp_at - now < KEEPALIVE_EXPIRY_WINDOW_SECONDS or
+                 account.get("ok") is not True)))
+
+
+def next_keepalive_at(account: dict, now: int, next_run: int | None) -> int | None:
+    """按 keepalive_needed 的同一判据，推算后台循环哪一轮会给这个账号续期；不保活的账号返回 None。"""
+    if not (getattr(CFG, "keepalive_disabled_accounts", False) or account.get("enabled", True)):
+        return None
+    tick = max(next_run or now, now)
+    last_ka = account.get("last_keepalive") or 0
+    if not last_ka:
+        return tick
+    when = last_ka + KEEPALIVE_MIN_GAP_SECONDS + 1
+    exp_at = account.get("expires_at")
+    if account.get("ok") is True and exp_at:
+        when = max(when, exp_at - KEEPALIVE_EXPIRY_WINDOW_SECONDS + 1)
+    if when <= tick:
+        return tick
+    rounds = -(-(when - tick) // KEEPALIVE_INTERVAL_SECONDS)
+    return tick + rounds * KEEPALIVE_INTERVAL_SECONDS
 
 
 def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
@@ -2521,17 +2586,7 @@ async def run_keepalive_all(force: bool = False) -> dict:
             for a in accounts:
                 aid = a["id"]
                 label = a.get("label", aid)
-                exp_at = a.get("expires_at")
-                last_ka = a.get("last_keepalive") or 0
-
-                needs_run = (
-                    force
-                    or not last_ka
-                    or ((now - last_ka) > 6 * 3600 and
-                        (not exp_at or exp_at - now < 36 * 3600 or
-                         a.get("ok") is not True))
-                )
-                if not needs_run:
+                if not (force or keepalive_needed(a, now)):
                     skipped.append({"id": aid, "label": label, "reason": "会话充足且近期已保活"})
                     continue
 
@@ -2549,7 +2604,7 @@ async def run_keepalive_all(force: bool = False) -> dict:
                 "skipped": skipped,
             }
             KEEPALIVE_STATE["last_result"] = summary
-            KEEPALIVE_STATE["next_run"] = now + 900
+            KEEPALIVE_STATE["next_run"] = now + KEEPALIVE_INTERVAL_SECONDS
             return summary
         finally:
             KEEPALIVE_STATE["running"] = False
@@ -2602,7 +2657,7 @@ async def _keepalive_loop():
             await run_keepalive_all(force=False)
         except Exception as e:  # noqa: BLE001
             log.error("【自动保活守护进程】轮询异常: %s", e)
-        await asyncio.sleep(900)
+        await asyncio.sleep(KEEPALIVE_INTERVAL_SECONDS)
 
 
 @app.post("/admin/accounts/keepalive")
